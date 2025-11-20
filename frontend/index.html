@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anonimizador Judicial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Header -->
+    <header class="bg-indigo-600 text-white shadow-lg">
+        <div class="container mx-auto px-4 py-6">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-gavel text-3xl"></i>
+                    <div>
+                        <h1 class="text-2xl font-bold">Anonimizador Judicial</h1>
+                        <p class="text-indigo-200 text-sm">Procesamiento seguro de documentos legales</p>
+                    </div>
+                </div>
+                <div id="statusIndicator" class="flex items-center space-x-2">
+                    <div class="w-3 h-3 bg-gray-400 rounded-full" id="statusDot"></div>
+                    <span class="text-sm" id="statusText">Verificando conexión...</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Upload Section -->
+        <div class="bg-white rounded-lg shadow-md p-8 mb-6">
+            <div class="flex items-center mb-6">
+                <i class="fas fa-upload text-indigo-600 text-2xl mr-3"></i>
+                <h2 class="text-2xl font-semibold text-gray-800">Subir Documento</h2>
+            </div>
+
+            <!-- Drop Zone -->
+            <div id="dropZone" class="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center hover:border-indigo-400 transition-colors cursor-pointer">
+                <i class="fas fa-cloud-upload-alt text-6xl text-gray-400 mb-4"></i>
+                <p class="text-gray-600 mb-2">Arrastra tu documento aquí o haz click para seleccionar</p>
+                <p class="text-sm text-gray-500">Formatos soportados: .docx, .doc, .rtf</p>
+                <input type="file" id="fileInput" accept=".docx,.doc,.rtf" class="hidden">
+            </div>
+
+            <!-- File Info -->
+            <div id="fileInfo" class="hidden mt-4 p-4 bg-blue-50 rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-file-alt text-blue-600 text-2xl"></i>
+                        <div>
+                            <p class="font-medium text-gray-800" id="fileName"></p>
+                            <p class="text-sm text-gray-600" id="fileSize"></p>
+                        </div>
+                    </div>
+                    <button id="removeFile" class="text-red-600 hover:text-red-800">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="mt-6 flex space-x-4">
+                <button id="anonymizeBtn" class="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-indigo-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed" disabled>
+                    <i class="fas fa-shield-alt mr-2"></i>
+                    Anonimizar Documento
+                </button>
+                <button id="previewBtn" class="flex-1 bg-gray-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-gray-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed" disabled>
+                    <i class="fas fa-eye mr-2"></i>
+                    Vista Previa
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progressSection" class="hidden bg-white rounded-lg shadow-md p-8 mb-6">
+            <div class="flex items-center mb-4">
+                <i class="fas fa-spinner fa-spin text-indigo-600 text-2xl mr-3"></i>
+                <h3 class="text-xl font-semibold text-gray-800">Procesando documento...</h3>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-2">
+                <div id="progressBar" class="bg-indigo-600 h-3 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+            <p class="text-sm text-gray-600" id="progressText">Iniciando proceso...</p>
+        </div>
+
+        <!-- Preview Section -->
+        <div id="previewSection" class="hidden bg-white rounded-lg shadow-md p-8 mb-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-xl font-semibold text-gray-800">
+                    <i class="fas fa-eye text-indigo-600 mr-2"></i>
+                    Vista Previa del Texto
+                </h3>
+                <button id="closePreview" class="text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            <div class="bg-gray-50 p-4 rounded-lg border border-gray-200 max-h-96 overflow-y-auto">
+                <pre id="previewText" class="whitespace-pre-wrap text-sm text-gray-700 font-mono"></pre>
+            </div>
+            <div class="mt-4 flex items-center text-sm text-gray-600">
+                <i class="fas fa-info-circle mr-2"></i>
+                <span>Mostrando primeros 500 caracteres | Total: <span id="totalChars" class="font-semibold"></span> caracteres</span>
+            </div>
+        </div>
+
+        <!-- Info Section -->
+        <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg shadow-md p-8">
+            <h3 class="text-xl font-semibold text-gray-800 mb-4 flex items-center">
+                <i class="fas fa-info-circle text-indigo-600 mr-2"></i>
+                Información del Proceso
+            </h3>
+            <div class="space-y-3 text-gray-700">
+                <div class="flex items-start">
+                    <i class="fas fa-check-circle text-green-500 mt-1 mr-3"></i>
+                    <p><strong>Extracción inteligente:</strong> El sistema diferencia entre partes del proceso (a anonimizar) y autores doctrinarios (se preservan).</p>
+                </div>
+                <div class="flex items-start">
+                    <i class="fas fa-check-circle text-green-500 mt-1 mr-3"></i>
+                    <p><strong>Datos protegidos:</strong> Nombres, DNI, CUIL, domicilios, teléfonos, emails y cuentas bancarias.</p>
+                </div>
+                <div class="flex items-start">
+                    <i class="fas fa-check-circle text-green-500 mt-1 mr-3"></i>
+                    <p><strong>Privacidad:</strong> El procesamiento se realiza localmente usando tu propio servidor LLM.</p>
+                </div>
+                <div class="flex items-start">
+                    <i class="fas fa-check-circle text-green-500 mt-1 mr-3"></i>
+                    <p><strong>Preserva contexto:</strong> Mantiene números de expediente, fechas, montos y estructura del documento.</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-gray-300 mt-16">
+        <div class="container mx-auto px-4 py-6 text-center">
+            <p class="text-sm">Anonimizador Judicial v2.0 | Procesamiento local y seguro</p>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
