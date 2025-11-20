@@ -105,6 +105,82 @@
             </div>
         </div>
 
+        <!-- Results Section -->
+        <div id="resultsSection" class="hidden bg-white rounded-lg shadow-md p-8 mb-6">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-semibold text-gray-800">
+                    <i class="fas fa-check-circle text-green-600 mr-2"></i>
+                    Documento Anonimizado
+                </h3>
+                <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
+                    Procesado exitosamente
+                </span>
+            </div>
+
+            <!-- Download Button -->
+            <div class="mb-6">
+                <button id="downloadBtn" class="w-full bg-green-600 text-white px-6 py-4 rounded-lg font-medium hover:bg-green-700 transition-colors flex items-center justify-center space-x-2">
+                    <i class="fas fa-download text-xl"></i>
+                    <span class="text-lg">Descargar Documento Anonimizado</span>
+                </button>
+            </div>
+
+            <!-- Stats -->
+            <div id="statsSection" class="grid grid-cols-3 gap-4 mb-6">
+                <div class="bg-blue-50 p-4 rounded-lg text-center">
+                    <p class="text-sm text-gray-600 mb-1">Formato</p>
+                    <p class="text-lg font-semibold text-gray-800" id="resultFormat">-</p>
+                </div>
+                <div class="bg-purple-50 p-4 rounded-lg text-center">
+                    <p class="text-sm text-gray-600 mb-1">Archivo Original</p>
+                    <p class="text-lg font-semibold text-gray-800" id="resultOriginalName">-</p>
+                </div>
+                <div class="bg-indigo-50 p-4 rounded-lg text-center">
+                    <p class="text-sm text-gray-600 mb-1">ID de Archivo</p>
+                    <p class="text-xs font-mono text-gray-800" id="resultFileId">-</p>
+                </div>
+            </div>
+
+            <!-- Warnings Section -->
+            <div id="warningsSection" class="hidden mb-6">
+                <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded">
+                    <div class="flex items-start">
+                        <i class="fas fa-exclamation-triangle text-yellow-600 mt-1 mr-3"></i>
+                        <div class="flex-1">
+                            <h4 class="font-semibold text-yellow-800 mb-2">Advertencias del Proceso</h4>
+                            <ul id="warningsList" class="text-sm text-yellow-700 space-y-1 list-disc list-inside">
+                                <!-- Warnings will be added here -->
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Process Again Button -->
+            <button id="processAnotherBtn" class="w-full bg-gray-200 text-gray-700 px-6 py-3 rounded-lg font-medium hover:bg-gray-300 transition-colors">
+                <i class="fas fa-redo mr-2"></i>
+                Procesar otro documento
+            </button>
+        </div>
+
+        <!-- Error Section -->
+        <div id="errorSection" class="hidden bg-white rounded-lg shadow-md p-8 mb-6">
+            <div class="flex items-start mb-4">
+                <i class="fas fa-exclamation-circle text-red-600 text-3xl mr-4 mt-1"></i>
+                <div class="flex-1">
+                    <h3 class="text-xl font-semibold text-red-800 mb-2">Error al Procesar Documento</h3>
+                    <p class="text-gray-700 mb-4" id="errorMessage">Ha ocurrido un error inesperado.</p>
+                    <div class="bg-red-50 p-4 rounded-lg border border-red-200">
+                        <p class="text-sm text-red-700 font-mono" id="errorDetails"></p>
+                    </div>
+                </div>
+            </div>
+            <button id="retryBtn" class="w-full bg-red-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-red-700 transition-colors mt-4">
+                <i class="fas fa-redo mr-2"></i>
+                Intentar nuevamente
+            </button>
+        </div>
+
         <!-- Info Section -->
         <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg shadow-md p-8">
             <h3 class="text-xl font-semibold text-gray-800 mb-4 flex items-center">

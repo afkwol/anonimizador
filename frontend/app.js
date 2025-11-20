@@ -5,6 +5,7 @@
 // Estado de la aplicación
 const state = {
     selectedFile: null,
+    fileId: null,
     apiBase: 'http://localhost:8000'
 };
 
@@ -26,7 +27,19 @@ const elements = {
     totalChars: document.getElementById('totalChars'),
     closePreview: document.getElementById('closePreview'),
     statusDot: document.getElementById('statusDot'),
-    statusText: document.getElementById('statusText')
+    statusText: document.getElementById('statusText'),
+    resultsSection: document.getElementById('resultsSection'),
+    downloadBtn: document.getElementById('downloadBtn'),
+    resultFormat: document.getElementById('resultFormat'),
+    resultOriginalName: document.getElementById('resultOriginalName'),
+    resultFileId: document.getElementById('resultFileId'),
+    warningsSection: document.getElementById('warningsSection'),
+    warningsList: document.getElementById('warningsList'),
+    processAnotherBtn: document.getElementById('processAnotherBtn'),
+    errorSection: document.getElementById('errorSection'),
+    errorMessage: document.getElementById('errorMessage'),
+    errorDetails: document.getElementById('errorDetails'),
+    retryBtn: document.getElementById('retryBtn')
 };
 
 // Inicialización
@@ -53,6 +66,9 @@ function initializeEventListeners() {
     elements.anonymizeBtn.addEventListener('click', anonymizeDocument);
     elements.previewBtn.addEventListener('click', previewDocument);
     elements.closePreview.addEventListener('click', closePreview);
+    elements.downloadBtn.addEventListener('click', downloadDocument);
+    elements.processAnotherBtn.addEventListener('click', resetUI);
+    elements.retryBtn.addEventListener('click', retryProcess);
 }
 
 /**
@@ -70,6 +86,7 @@ async function checkApiHealth() {
         }
     } catch (error) {
         updateStatus('offline', 'Servidor no disponible');
+        console.error('Error verificando salud del API:', error);
     }
 }
 
@@ -136,7 +153,17 @@ function handleFile(file) {
     const isValid = validExtensions.some(ext => fileName.endsWith(ext));
 
     if (!isValid) {
-        showError('Formato no válido. Use: .docx, .doc o .rtf');
+        showErrorUI('Formato no válido', 'Use archivos .docx, .doc o .rtf');
+        return;
+    }
+
+    // Validar tamaño (10MB)
+    const maxSize = 10 * 1024 * 1024;
+    if (file.size > maxSize) {
+        showErrorUI(
+            'Archivo demasiado grande',
+            `El archivo excede el límite de 10MB. Tamaño: ${formatFileSize(file.size)}`
+        );
         return;
     }
 
@@ -152,8 +179,8 @@ function handleFile(file) {
     elements.anonymizeBtn.disabled = false;
     elements.previewBtn.disabled = false;
 
-    // Ocultar preview si está abierto
-    closePreview();
+    // Ocultar secciones anteriores
+    hideAllSections();
 }
 
 /**
@@ -165,7 +192,7 @@ function clearFile() {
     elements.fileInfo.classList.add('hidden');
     elements.anonymizeBtn.disabled = true;
     elements.previewBtn.disabled = true;
-    closePreview();
+    hideAllSections();
 }
 
 /**
@@ -200,7 +227,7 @@ async function previewDocument() {
         hideProgress();
     } catch (error) {
         hideProgress();
-        showError(`Error en vista previa: ${error.message}`);
+        showErrorUI('Error en vista previa', error.message);
     }
 }
 
@@ -210,51 +237,144 @@ async function previewDocument() {
 async function anonymizeDocument() {
     if (!state.selectedFile) return;
 
-    showProgress('Procesando documento...', 0);
+    // Ocultar secciones anteriores
+    hideAllSections();
+
+    showProgress('Subiendo documento...', 10);
 
     try {
-        // Paso 1: Subir archivo
-        updateProgress('Subiendo documento...', 20);
+        // Paso 1: Subir y procesar
         const formData = new FormData();
         formData.append('file', state.selectedFile);
 
-        // Paso 2: Procesar
-        updateProgress('Extrayendo entidades sensibles...', 40);
+        updateProgress('Extrayendo texto del documento...', 25);
+        updateProgress('Identificando entidades con LLM...', 50);
 
-        const response = await fetch(`${state.apiBase}/api/anonymize`, {
+        const response = await fetch(`${state.apiBase}/upload`, {
             method: 'POST',
             body: formData
         });
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail || 'Error al anonimizar');
+            throw new Error(error.detail || 'Error al procesar documento');
         }
 
-        // Paso 3: Descargar resultado
-        updateProgress('Generando documento anonimizado...', 80);
+        const data = await response.json();
 
+        // Guardar file_id
+        state.fileId = data.file_id;
+
+        updateProgress('Documento procesado exitosamente', 100);
+
+        // Mostrar resultados
+        setTimeout(() => {
+            hideProgress();
+            showResults(data);
+        }, 500);
+
+    } catch (error) {
+        hideProgress();
+        showErrorUI('Error al anonimizar documento', error.message);
+    }
+}
+
+/**
+ * Descargar documento anonimizado
+ */
+async function downloadDocument() {
+    if (!state.fileId) {
+        showErrorUI('Error', 'No hay documento disponible para descargar');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${state.apiBase}/download/${state.fileId}`);
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Error al descargar');
+        }
+
+        // Descargar archivo
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `anonimizado_${state.selectedFile.name}`;
+        a.download = `anonimizado_${state.selectedFile.name.replace(/\.[^.]+$/, '')}.txt`;
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
         document.body.removeChild(a);
 
-        updateProgress('Completado', 100);
-
-        setTimeout(() => {
-            hideProgress();
-            showSuccess('Documento anonimizado correctamente');
-        }, 1000);
-
     } catch (error) {
-        hideProgress();
-        showError(`Error al anonimizar: ${error.message}`);
+        showErrorUI('Error al descargar', error.message);
     }
+}
+
+/**
+ * Mostrar resultados
+ */
+function showResults(data) {
+    // Llenar datos
+    elements.resultFormat.textContent = data.format.toUpperCase();
+    elements.resultOriginalName.textContent = data.original_name;
+    elements.resultFileId.textContent = data.file_id.substring(0, 8) + '...';
+
+    // Mostrar warnings si existen (simulado por ahora)
+    const warnings = data.warnings || [];
+    if (warnings.length > 0) {
+        elements.warningsList.innerHTML = '';
+        warnings.forEach(warning => {
+            const li = document.createElement('li');
+            li.textContent = warning;
+            elements.warningsList.appendChild(li);
+        });
+        elements.warningsSection.classList.remove('hidden');
+    } else {
+        elements.warningsSection.classList.add('hidden');
+    }
+
+    // Mostrar sección de resultados
+    elements.resultsSection.classList.remove('hidden');
+}
+
+/**
+ * Mostrar error en UI
+ */
+function showErrorUI(title, details) {
+    elements.errorMessage.textContent = title;
+    elements.errorDetails.textContent = details;
+    elements.errorSection.classList.remove('hidden');
+}
+
+/**
+ * Reintentar proceso
+ */
+function retryProcess() {
+    hideAllSections();
+    if (state.selectedFile) {
+        anonymizeDocument();
+    }
+}
+
+/**
+ * Resetear UI para procesar otro documento
+ */
+function resetUI() {
+    hideAllSections();
+    clearFile();
+    state.fileId = null;
+}
+
+/**
+ * Ocultar todas las secciones
+ */
+function hideAllSections() {
+    elements.previewSection.classList.add('hidden');
+    elements.resultsSection.classList.add('hidden');
+    elements.errorSection.classList.add('hidden');
+    elements.progressSection.classList.add('hidden');
 }
 
 /**
@@ -289,22 +409,10 @@ function updateProgress(message, percent) {
 function hideProgress() {
     elements.progressSection.classList.add('hidden');
     elements.progressBar.style.width = '0%';
-    elements.anonymizeBtn.disabled = false;
-    elements.previewBtn.disabled = false;
-}
-
-/**
- * Mostrar error
- */
-function showError(message) {
-    alert(`Error: ${message}`);
-}
-
-/**
- * Mostrar éxito
- */
-function showSuccess(message) {
-    alert(`Éxito: ${message}`);
+    if (state.selectedFile) {
+        elements.anonymizeBtn.disabled = false;
+        elements.previewBtn.disabled = false;
+    }
 }
 
 /**
