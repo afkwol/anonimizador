@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from document_processor import process_document
-from anonimizador import anonymize_text
+from anonimizador import anonymize_text_full
 
 # Cargar variables de entorno
 load_dotenv()
@@ -104,8 +104,8 @@ async def upload_document(file: UploadFile = File(...)):
         # 1. Extraer texto del documento
         text, doc_format = process_document(input_path)
 
-        # 2. Anonimizar con LLM
-        anonymized_text = await anonymize_text(text)
+        # 2. Anonimizar con LLM (extracción + reemplazo)
+        anonymized_text = await anonymize_text_full(text)
 
         # 3. Guardar documento anonimizado
         output_path = TMP_DIR / f"{file_id}_output.txt"
