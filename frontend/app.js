@@ -6,7 +6,7 @@
 const state = {
     selectedFile: null,
     fileId: null,
-    apiBase: 'http://localhost:8000'
+    apiBase: window.location.origin  // Usa la misma URL desde donde se carga la página
 };
 
 // Elementos DOM
