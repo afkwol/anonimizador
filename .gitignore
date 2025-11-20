@@ -60,6 +60,8 @@ test_*.rtf
 prueba_*.docx
 prueba_*.doc
 prueba_*.rtf
+documento_prueba.docx
+resultado_test_*.docx
 
 # Backend temporal files
 backend/__pycache__/
