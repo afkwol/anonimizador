@@ -46,7 +46,27 @@ Thumbs.db
 *.tmp
 temp/
 tmp/
+/tmp/anonimizador/
 
 # Documentos procesados
 *_anonimizado.*
 *_comparacion.html
+anonimizado_*
+
+# Test files
+test_*.docx
+test_*.doc
+test_*.rtf
+prueba_*.docx
+prueba_*.doc
+prueba_*.rtf
+
+# Backend temporal files
+backend/__pycache__/
+backend/*.pyc
+backend/.pytest_cache/
+
+# Node modules (si se usa algún build tool)
+node_modules/
+package-lock.json
+yarn.lock
