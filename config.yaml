@@ -4,9 +4,10 @@ lm_api:
   model: "granite-3.1-8b-instruct"
 
 chunking:
-  max_context_tokens: 2500
-  overlap_tokens: 0
+  max_prompt_tokens: 3500
+  overlap_tokens: 20
   safety_factor: 0.85
+  tokenizer: "simple"
 
 inference:
   temperature: 0.0
@@ -23,3 +24,13 @@ runtime:
   max_retries: 2
   retry_backoff_seconds: 2.0
   abort_on_failure: false
+
+privacy:
+  strict_mode: false
+  debug_logs: false
+  enable_diff: false
+  artifact_ttl_days: 7
+
+pii:
+  regex_profiles:
+    - "default"

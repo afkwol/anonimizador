@@ -6,7 +6,7 @@ Este documento resume, con referencias al código fuente, cada etapa crítica de
 
 - **Entorno**: Python 3.9+ (probado en Windows) con las dependencias de `requirements.txt`. La GUI usa `tkinter`, por lo que conviene instalar Python oficial si falta la librería (`README.md`).
 - **Servidor LM Studio**: Debe estar en ejecución con el servidor local activo (`Start Server`). `LMStudioClient.check_health` consulta `GET /models` (`anonimizador v.5.py:212-220`), así que ese endpoint debe responder en `base_url`.
-- **Modelos/formatos**: El pipeline espera modelos chat compatibles con `/chat/completions` y archivos de entrada `.pdf`, `.doc` o `.docx`. Otros formatos disparan un `ValueError` temprano (`anonimizador v.5.py:666-699`).
+- **Modelos/formatos**: El pipeline espera modelos chat compatibles con `/chat/completions` y archivos de entrada `.pdf` o `.docx`. Otros formatos disparan un `ValueError` temprano (`anonimizador v.5.py:666-699`).
 
 ## 1. Configuración y logging
 
@@ -20,9 +20,13 @@ Este documento resume, con referencias al código fuente, cada etapa crítica de
 |---------------------------|-----------|----------------------------------|---------------|
 | `lm_api.base_url`         | string    | `http://127.0.0.1:1234/v1`       | Endpoint de LM Studio; usado en `/models` y `/chat/completions`. |
 | `lm_api.model`            | string    | `granite-3.1-8b-instruct`        | Nombre exacto que expone LM Studio. |
-| `chunking.max_context_tokens` | entero | `2500`                           | Tamaño bruto del contexto; luego se escala por `safety_factor`. |
-| `chunking.safety_factor`  | float     | `0.85`                           | Reduce `max_context_tokens` para reservar margen al prompt del sistema. |
+| `chunking.max_prompt_tokens` | entero | `3500`                           | Límite de tokens del prompt (sistema+usuario) antes de enviar al modelo. |
+| `chunking.overlap_tokens` | entero    | `20`                             | Solapamiento entre chunks para evitar cortes de entidades. |
+| `chunking.safety_factor`  | float     | `0.85`                           | Margen para no agotar el contexto. |
 | `inference.max_tokens`    | entero    | `1024`                           | Límite de tokens generados por chunk (llega tal cual al endpoint). |
+| `privacy.strict_mode`     | booleano  | `false`                          | En `true`, cualquier fallo de validación aborta la corrida. |
+| `privacy.enable_diff`     | booleano  | `false`                          | Genera diffs HTML (pueden exponer texto original). |
+| `privacy.debug_logs`      | booleano  | `false`                          | Permite registrar contenido en logs/previews. |
 | `runtime.max_retries`     | entero    | `2`                              | Cantidad de reintentos de `LMStudioClient.generate` antes de abortar. |
 | `runtime.logs_dir`        | ruta      | `./logs`                         | Directorio para los `.jsonl/.json`; se vuelve absoluto con `resolve_logs_dir`. |
 | `runtime.abort_on_failure`| booleano  | `false`                          | Si es `true`, `process_chunks` corta en el primer chunk fallido. |
@@ -37,37 +41,25 @@ Este documento resume, con referencias al código fuente, cada etapa crítica de
 4. Se aborta si no se extrajo contenido (`anonimizador v.5.py:687-688`).  
 5. Errores de lectura (archivo inexistente, formato no soportado, PDF sin texto) levantan excepciones que se capturan en `run_anonymization`: el `RunLogger` marca la corrida como `status="error"`, preserva cualquier archivo parcial y deja trazas en `run_summary_<id>.json` para depuración (`anonimizador v.5.py:700-767`).
 
-## 3. Tokenización y troceo
+## 3. Pre-masking, tokenización y troceo
 
-1. `tokenize_with_spans` recorre el texto con una regex que conserva espacios y registra offsets (`anonimizador v.5.py:308-325`).  
-2. `build_chunks` corta el documento en fragmentos contiguos de `max_context_tokens * safety_factor`, rechaza solapamientos y garantiza continuidad con `validate_chunk_sequence` (`anonimizador v.5.py:328-391`).  
-3. Cada `Chunk` almacena índices de caracteres/tokens y utilidades como `preview` para logs (`anonimizador v.5.py:268-285`).  
-4. El algoritmo puede visualizarse como:
+1. Después de extraer el texto, `pre_mask_text` aplica máscaras deterministas (regex) y devuelve `masked_text` + `mask_map` (`anonimizador v.5.py:711-717`, `pii.py`).  
+2. Se construye un tokenizador (`build_tokenizer`) y se calcula el presupuesto de tokens del prompt; `build_chunks_with_tokenizer` corta el texto en ventanas con solapamiento (`anonimizador v.5.py:330-356`, `tokenizer_utils.py`).  
+3. Cada `Chunk` almacena offsets y longitudes; `validate_chunk_sequence` asegura que no haya huecos en la cobertura.
 
-```text
-token_spans = tokenize(text)
-for token_start in range(0, total_tokens, effective_chunk_tokens):
-    token_end = min(token_start + effective_chunk_tokens, total_tokens)
-    char_start = token_spans[token_start].start
-    char_end   = token_spans[token_end-1].end
-    yield Chunk(text[char_start:char_end], offsets)
-```
+## 4. Procesamiento y validación de chunks
 
-Con esto se preserva el mapeo “token → offset” para reconstruir sin huecos. `overlap_tokens` se fuerza a `0` porque los offsets se usan como ventanas cerradas; cualquier superposición rompería `merge_chunks`.
+1. El `SYSTEM_PROMPT` define reglas estrictas y placeholders permitidos; el prompt del usuario es el texto enmascarado de cada chunk (`anonimizador v.5.py:396-435`).  
+2. `process_chunks` llama a `LMStudioClient.generate` y aplica `post_scan_text` para detectar PII o placeholders no permitidos (`anonimizador v.5.py:437-526`).  
+3. En modo estricto cualquier hallazgo aborta la corrida; en modo laxo el chunk se reemplaza por `[CHUNK OMITIDO POR ERROR]` y la corrida queda en estado `error`.  
+4. Logs y previews incluyen contenido solo si `privacy.debug_logs`/`runtime.debug` están activos.
 
-## 4. Procesamiento de chunks
+## 5. Fusión y validación posterior
 
-1. El `SYSTEM_PROMPT` define reglas estrictas y placeholders permitidos; el prompt del usuario es el texto del chunk (`anonimizador v.5.py:396-435`).  
-2. `process_chunks` itera secuencialmente, llama a `LMStudioClient.generate` (determinista, con reintentos y backoff) y registra métricas/duración por fragmento (`anonimizador v.5.py:171-259`, `anonimizador v.5.py:437-516`).  
-3. El modo debug guarda entrada y salida completas en el log, y `abort_on_failure` permite cortar la corrida si algún chunk falla (`anonimizador v.5.py:446-469`).  
-4. Cada llamada a `LMStudioClient.generate` usa `timeout=120s` y `max_retries` con retroceso lineal (`retry_backoff_seconds`). Si todos los intentos fallan, se registra `failed_chunks`, la GUI recibe un mensaje de error y el resumen final queda en `status="error"` manteniendo el historial en `run_<id>.jsonl`.
-
-## 5. Fusión y validación
-
-1. `merge_chunks` recompone el documento usando los offsets para evitar solapamientos; luego se escribe `*_anonimizado.txt` (`anonimizador v.5.py:529-548`, `anonimizador v.5.py:712-714`).  
-2. `calculate_length_metrics` calcula delta/ratio y `generate_diff_report` crea `*_comparacion.html` (`anonimizador v.5.py:552-582`, `anonimizador v.5.py:729-734`).  
-3. `detect_suspicious_edits` usa `SequenceMatcher` para reportar reemplazos u omisiones inesperadas y corta la lista tras `max_items=10`. Se ignoran cambios que sólo contienen placeholders definidos en `PLACEHOLDER_TOKENS`. El resultado alimenta el bloque `validation` del resumen (`anonimizador v.5.py:586-623`, `anonimizador v.5.py:736-757`).  
-4. `RunLogger.finalize` agrega todos los datos al `run_summary_<id>.json` (`anonimizador v.5.py:161-169`).
+1. `merge_chunks` recompone el documento respetando solapamientos; chunks fallidos insertan `[CHUNK OMITIDO POR ERROR]` (`anonimizador v.5.py:529-551`).  
+2. `calculate_length_metrics` calcula delta/ratio; el diff HTML es opcional según `privacy.enable_diff` (`anonimizador v.5.py:552-582`, `anonimizador v.5.py:729-734`).  
+3. `detect_suspicious_edits` agrega advertencias sin exponer contenido salvo en modo debug (`anonimizador v.5.py:736-757`).  
+4. `RunLogger.finalize` persiste el resumen (`anonimizador v.5.py:161-169`).
 
 ## 6. GUI y orquestación
 

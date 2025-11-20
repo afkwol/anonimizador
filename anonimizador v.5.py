@@ -20,6 +20,10 @@ from difflib import HtmlDiff, SequenceMatcher
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from tokenizer_utils import TokenizerWrapper, build_tokenizer, split_with_overlap
+from pii import pre_mask_text, post_scan_text, ALLOWED_PLACEHOLDERS
+from storage_utils import cleanup_old_artifacts
+
 
 # ==========================
 # 1. CONFIGURACIÓN Y UTILIDADES
@@ -34,9 +38,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "granite-3.1-8b-instruct",
     },
     "chunking": {
-        "max_context_tokens": 2500,
-        "overlap_tokens": 0,
+        "max_prompt_tokens": 3500,
+        "overlap_tokens": 20,
         "safety_factor": 0.85,
+        "tokenizer": "simple",
     },
     "inference": {
         "temperature": 0.0,
@@ -45,6 +50,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_tokens": 1024,
         "repeat_penalty": 1.0,
         "stop_sequences": ["</s>"],
+    },
+    "privacy": {
+        "strict_mode": False,
+        "debug_logs": False,
+        "enable_diff": False,
+        "artifact_ttl_days": 7,
+    },
+    "pii": {
+        "regex_profiles": ["default"],
     },
     "runtime": {
         "logs_dir": "logs",
@@ -72,6 +86,13 @@ ENV_OVERRIDE_MAP: Dict[str, Tuple[Sequence[str], Callable[[str], Any]]] = {
     "MAX_RETRIES": (("runtime", "max_retries"), int),
     "RETRY_BACKOFF_SECONDS": (("runtime", "retry_backoff_seconds"), float),
     "ABORT_ON_FAILURE": (("runtime", "abort_on_failure"), lambda v: v.lower() in {"1", "true", "yes"}),
+    "STRICT_MODE": (("privacy", "strict_mode"), lambda v: v.lower() in {"1", "true", "yes"}),
+    "ENABLE_DIFF": (("privacy", "enable_diff"), lambda v: v.lower() in {"1", "true", "yes"}),
+    "DEBUG_LOGS": (("privacy", "debug_logs"), lambda v: v.lower() in {"1", "true", "yes"}),
+    "ARTIFACT_TTL_DAYS": (("privacy", "artifact_ttl_days"), int),
+    "CHUNK_TOKENIZER": (("chunking", "tokenizer"), str),
+    "CHUNK_OVERLAP_TOKENS": (("chunking", "overlap_tokens"), int),
+    "CHUNK_MAX_PROMPT_TOKENS": (("chunking", "max_prompt_tokens"), int),
 }
 
 
@@ -305,51 +326,34 @@ def extract_text_from_docx(file_path: Path) -> str:
 # ==========================
 # 3. TOKENIZACIÓN Y TROCEO
 # ==========================
-TOKEN_PATTERN = re.compile(r"\S+\s*")
 
 
-def tokenize_with_spans(text: str) -> List[TokenSpan]:
-    spans: List[TokenSpan] = []
-    cursor = 0
+def build_chunks_with_tokenizer(
+    text: str,
+    tokenizer: TokenizerWrapper,
+    max_prompt_tokens: int,
+    overlap_tokens: int,
+    safety_factor: float,
+    system_prompt_tokens: int,
+) -> List[Chunk]:
+    ensure_positive(max_prompt_tokens, "max_prompt_tokens")
+    ensure_positive(max(0, overlap_tokens) + 1, "overlap_tokens + 1")
 
-    for match in TOKEN_PATTERN.finditer(text):
-        if match.start() > cursor:
-            whitespace_chunk = text[cursor:match.start()]
-            spans.append(TokenSpan(token=whitespace_chunk, start=cursor, end=match.start()))
-        spans.append(TokenSpan(token=match.group(0), start=match.start(), end=match.end()))
-        cursor = match.end()
-
-    if cursor < len(text):
-        spans.append(TokenSpan(token=text[cursor:], start=cursor, end=len(text)))
-
-    return spans
-
-
-def build_chunks(text: str, max_tokens: int, overlap_tokens: int, safety_factor: float) -> List[Chunk]:
-    token_spans = tokenize_with_spans(text)
-    total_tokens = len(token_spans)
-
-    effective_chunk_tokens = max(1, int(max_tokens * safety_factor))
-    if overlap_tokens > 0:
-        raise ValueError("El solapamiento entre chunks no está soportado actualmente. Configura overlap_tokens en 0.")
-
-    ensure_positive(effective_chunk_tokens, "max_context_tokens ajustado")
+    windowed = split_with_overlap(
+        text=text,
+        tokenizer=tokenizer,
+        max_prompt_tokens=max_prompt_tokens,
+        system_prompt_tokens=system_prompt_tokens,
+        overlap_tokens=max(0, overlap_tokens),
+        safety_factor=safety_factor,
+    )
 
     chunks: List[Chunk] = []
-    token_start = 0
-    chunk_index = 1
-
-    while token_start < total_tokens:
-        token_end = min(token_start + effective_chunk_tokens, total_tokens)
-        chunk_spans = token_spans[token_start:token_end]
-        char_start = chunk_spans[0].start
-        char_end = chunk_spans[-1].end
-        chunk_text = text[char_start:char_end]
-
+    for idx, (chunk_text, char_start, char_end, token_start, token_end) in enumerate(windowed, start=1):
         chunks.append(
             Chunk(
-                index=chunk_index,
-                total=0,
+                index=idx,
+                total=len(windowed),
                 text=chunk_text,
                 char_start=char_start,
                 char_end=char_end,
@@ -358,18 +362,7 @@ def build_chunks(text: str, max_tokens: int, overlap_tokens: int, safety_factor:
             )
         )
 
-        if token_end >= total_tokens:
-            break
-
-        token_start = token_end
-
-        chunk_index += 1
-
-    total_chunks = len(chunks)
-    for chunk in chunks:
-        chunk.total = total_chunks
-
-    validate_chunk_sequence(chunks, total_tokens)
+    validate_chunk_sequence(chunks, len(tokenizer.encode_with_spans(text)))
     return chunks
 
 
@@ -429,6 +422,23 @@ PLACEHOLDER_TOKENS = [
     "[CUENTA BANCARIA]",
 ]
 
+# Texto de reserva para evitar filtrar contenido sin anonimizar cuando un chunk falla.
+FAILED_CHUNK_PLACEHOLDER = "[CHUNK OMITIDO POR ERROR]"
+
+
+PLACEHOLDER_FALLBACK_PATTERN = re.compile(r"\[[^\]]+\]")
+
+
+def _contains_disallowed_placeholders(text: str) -> bool:
+    """Return True if text contains placeholder tokens outside the allowed whitelist."""
+    for token in PLACEHOLDER_FALLBACK_PATTERN.findall(text):
+        if token in ALLOWED_PLACEHOLDERS:
+            continue
+        if re.match(r"\[(EMAIL|DOCUMENTO|TELEFONO|DOMICILIO|CUENTA_BANCARIA|NOMBRE APELLIDO)_[0-9]+\]", token):
+            continue
+        return True
+    return False
+
 
 def build_user_prompt(chunk: Chunk) -> str:
     return chunk.text
@@ -439,12 +449,16 @@ def process_chunks(
     client: LMStudioClient,
     logger: RunLogger,
     runtime_config: Dict[str, Any],
+    privacy_config: Dict[str, Any],
+    pii_config: Dict[str, Any],
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[str], List[int]]:
     results: List[str] = [""] * len(chunks)
     failed_chunks: List[int] = []
     abort_on_failure = runtime_config.get("abort_on_failure", False)
     debug_mode = runtime_config.get("debug", False)
+    strict_mode = privacy_config.get("strict_mode", False)
+    debug_logs = privacy_config.get("debug_logs", False)
 
     total = len(chunks)
     if progress_callback:
@@ -463,40 +477,42 @@ def process_chunks(
         try:
             response = client.generate(SYSTEM_PROMPT, user_prompt)
             duration = time.time() - start_time
-            snippet = response[:120].replace("\n", " ").strip()
 
-            logger.log_chunk(
-                {
-                    "chunk_index": chunk.index,
-                    "total_chunks": chunk.total,
-                    "char_length": len(chunk.text),
-                    "output_char_length": len(response),
-                    "char_delta": len(response) - len(chunk.text),
-                    "length_ratio": round(len(response) / len(chunk.text), 4) if len(chunk.text) else None,
-                    "token_length": chunk.token_length,
-                    "duration_seconds": round(duration, 3),
-                    "status": "ok",
-                    "input_preview": chunk.preview(),
-                    "output_preview": snippet + ("..." if len(response) > 120 else ""),
-                }
-            )
+            findings = post_scan_text(response)
+            disallowed_placeholders = _contains_disallowed_placeholders(response)
 
-            if debug_mode:
-                logger.log_chunk(
-                    {
-                        "chunk_index": chunk.index,
-                        "total_chunks": chunk.total,
-                        "status": "debug",
-                        "raw_input": chunk.text,
-                        "raw_output": response,
-                    }
+            if findings or disallowed_placeholders:
+                raise ValueError(
+                    f"Validación PII fallida. Hallazgos: {len(findings)}, placeholders invalidos: {disallowed_placeholders}"
                 )
+
+            log_entry = {
+                "chunk_index": chunk.index,
+                "total_chunks": chunk.total,
+                "char_length": len(chunk.text),
+                "output_char_length": len(response),
+                "char_delta": len(response) - len(chunk.text),
+                "length_ratio": round(len(response) / len(chunk.text), 4) if len(chunk.text) else None,
+                "token_length": chunk.token_length,
+                "duration_seconds": round(duration, 3),
+                "status": "ok",
+            }
+            if debug_logs or debug_mode:
+                snippet = response[:120].replace("\n", " ").strip()
+                log_entry["input_preview"] = chunk.preview()
+                log_entry["output_preview"] = snippet + ("..." if len(response) > 120 else "")
+                if debug_mode:
+                    log_entry["raw_input"] = chunk.text
+                    log_entry["raw_output"] = response
+
+            logger.log_chunk(log_entry)
 
             results[chunk.index - 1] = response
 
         except Exception as exc:
             duration = time.time() - start_time
             logger.log_console(f"Error en chunk {chunk.index}: {exc}", level="ERROR")
+            results[chunk.index - 1] = FAILED_CHUNK_PLACEHOLDER
             logger.log_chunk(
                 {
                     "chunk_index": chunk.index,
@@ -512,7 +528,7 @@ def process_chunks(
                 }
             )
             failed_chunks.append(chunk.index)
-            if abort_on_failure:
+            if strict_mode or abort_on_failure:
                 if progress_callback:
                     progress_callback(chunk.index, total)
                 raise
@@ -531,17 +547,23 @@ def merge_chunks(chunks: Sequence[Chunk], processed_chunks: Sequence[str]) -> st
         return ""
 
     merged_parts: List[str] = []
-    covered_ranges: List[Tuple[int, int]] = []
+    current_end = 0
 
     for chunk, processed in zip(chunks, processed_chunks):
         start = chunk.char_start
         end = chunk.char_end
+        safe_text = processed if processed else FAILED_CHUNK_PLACEHOLDER
 
-        if any(not (end <= existing_start or start >= existing_end) for existing_start, existing_end in covered_ranges):
-            continue
+        # If there is overlap with already merged text, drop the overlapping prefix.
+        if start < current_end:
+            overlap = current_end - start
+            if overlap < len(safe_text):
+                safe_text = safe_text[overlap:]
+            else:
+                continue
 
-        covered_ranges.append((start, end))
-        merged_parts.append(processed if processed else chunk.text)
+        merged_parts.append(safe_text)
+        current_end = max(current_end, end)
 
     return "".join(merged_parts)
 
@@ -638,6 +660,8 @@ def run_anonymization(
     chunk_cfg = config.get("chunking", {})
     inference_cfg = config.get("inference", {})
     lm_cfg = config.get("lm_api", {})
+    privacy_cfg = config.get("privacy", {})
+    pii_cfg = config.get("pii", {})
 
     start_time = time.time()
     text = ""
@@ -675,11 +699,14 @@ def run_anonymization(
         client.check_health()
         logger.log_console("Conexión con LM Studio verificada.")
 
+        logs_dir = resolve_logs_dir(runtime_cfg)
+        cleanup_old_artifacts([logs_dir], ttl_days=privacy_cfg.get("artifact_ttl_days", 0))
+
         ext = file_path.suffix.lower()
         logger.log_console("Extrayendo texto del documento...")
         if ext == ".pdf":
             text = extract_text_from_pdf(file_path)
-        elif ext in {".doc", ".docx"}:
+        elif ext == ".docx":
             text = extract_text_from_docx(file_path)
         else:
             raise ValueError(f"Formato de archivo no soportado: {ext}")
@@ -689,11 +716,17 @@ def run_anonymization(
 
         logger.log_console(f"Caracteres extraídos: {len(text)}")
 
-        chunks = build_chunks(
-            text=text,
-            max_tokens=ensure_positive(chunk_cfg["max_context_tokens"], "max_context_tokens"),
-            overlap_tokens=max(0, chunk_cfg["overlap_tokens"]),
+        tokenizer = build_tokenizer(chunk_cfg.get("tokenizer", "simple"))
+        system_prompt_tokens = tokenizer.count_tokens(SYSTEM_PROMPT)
+        masked_text, _ = pre_mask_text(text)
+
+        chunks = build_chunks_with_tokenizer(
+            text=masked_text,
+            tokenizer=tokenizer,
+            max_prompt_tokens=ensure_positive(chunk_cfg.get("max_prompt_tokens", 3000), "max_prompt_tokens"),
+            overlap_tokens=max(0, chunk_cfg.get("overlap_tokens", 0)),
             safety_factor=float(chunk_cfg.get("safety_factor", 0.85)),
+            system_prompt_tokens=system_prompt_tokens,
         )
         logger.log_console(f"Documento dividido en {len(chunks)} chunks.")
 
@@ -702,8 +735,17 @@ def run_anonymization(
             client=client,
             logger=logger,
             runtime_config=runtime_cfg,
+            privacy_config=privacy_cfg,
+            pii_config=pii_cfg,
             progress_callback=progress_callback,
         )
+
+        if failed_chunks:
+            logger.log_console(
+                f"Chunks con error: {', '.join(map(str, failed_chunks))}. "
+                "El documento resultante marcará esos tramos como omitidos.",
+                level="WARN",
+            )
 
         logger.log_console("Unificando chunks procesados...")
         final_document = merge_chunks(chunks, processed_chunks)
@@ -726,25 +768,36 @@ def run_anonymization(
             f"diferencia: {length_metrics['delta']}. {ratio_msg}"
         )
 
-        try:
-            generate_diff_report(text, final_document, diff_report_file)
-            summary["diff_report_file"] = str(diff_report_file)
-            logger.log_console(f"Reporte de comparación generado en: {diff_report_file}")
-        except Exception as diff_exc:
-            logger.log_console(f"No se pudo generar el reporte de comparación: {diff_exc}", level="WARN")
+        if privacy_cfg.get("enable_diff", False):
+            try:
+                generate_diff_report(text, final_document, diff_report_file)
+                summary["diff_report_file"] = str(diff_report_file)
+                logger.log_console(f"Reporte de comparación generado en: {diff_report_file}")
+            except Exception as diff_exc:
+                logger.log_console(f"No se pudo generar el reporte de comparación: {diff_exc}", level="WARN")
 
         suspicious_edits = detect_suspicious_edits(text, final_document)
         if suspicious_edits:
-            summary["validation"] = {"status": "warn", "issues": suspicious_edits}
-            logger.log_console(
-                f"Validación automática: se detectaron {len(suspicious_edits)} diferencias no esperadas.",
-                level="WARN",
-            )
-            for issue in suspicious_edits[:3]:
+            if privacy_cfg.get("debug_logs", False):
+                summary["validation"] = {"status": "warn", "issues": suspicious_edits}
                 logger.log_console(
-                    " - "
-                    f"tipo={issue['type']}, original='{issue['original'][:80]}', "
-                    f"anonimizado='{issue['anon'][:80]}'",
+                    f"Validación automática: se detectaron {len(suspicious_edits)} diferencias no esperadas.",
+                    level="WARN",
+                )
+                for issue in suspicious_edits[:3]:
+                    logger.log_console(
+                        " - "
+                        f"tipo={issue['type']}, original='{issue['original'][:80]}', "
+                        f"anonimizado='{issue['anon'][:80]}'",
+                        level="WARN",
+                    )
+            else:
+                summary["validation"] = {
+                    "status": "warn",
+                    "issues": [{"type": issue["type"]} for issue in suspicious_edits],
+                }
+                logger.log_console(
+                    f"Validación automática: {len(suspicious_edits)} diferencias potenciales (detalles ocultos).",
                     level="WARN",
                 )
         else:
@@ -758,7 +811,7 @@ def run_anonymization(
                 "total_chunks": len(chunks),
                 "failed_chunks": failed_chunks,
                 "processing_seconds": round(time.time() - start_time, 2),
-                "status": "success",
+                "status": "error" if failed_chunks else "success",
             }
         )
 
@@ -908,14 +961,6 @@ class AnonymizerApp(tk.Tk):
                 ],
             ),
             (
-                "Troceo",
-                [
-                    (("chunking", "max_context_tokens"), "Tokens máximos por chunk", int),
-                    (("chunking", "overlap_tokens"), "Tokens de solapamiento", int),
-                    (("chunking", "safety_factor"), "Factor de seguridad", float),
-                ],
-            ),
-            (
                 "Parámetros del modelo",
                 [
                     (("inference", "temperature"), "Temperatura", float),
@@ -927,6 +972,15 @@ class AnonymizerApp(tk.Tk):
                 ],
             ),
             (
+                "Troceo",
+                [
+                    (("chunking", "max_prompt_tokens"), "Tokens máximos del prompt", int),
+                    (("chunking", "overlap_tokens"), "Tokens de solapamiento", int),
+                    (("chunking", "safety_factor"), "Factor de seguridad", float),
+                    (("chunking", "tokenizer"), "Tokenizador", str),
+                ],
+            ),
+            (
                 "Tiempo de ejecución",
                 [
                     (("runtime", "logs_dir"), "Directorio de logs", str),
@@ -934,6 +988,21 @@ class AnonymizerApp(tk.Tk):
                     (("runtime", "max_retries"), "Reintentos", int),
                     (("runtime", "retry_backoff_seconds"), "Backoff entre reintentos (s)", float),
                     (("runtime", "abort_on_failure"), "Abortar ante fallos", bool),
+                ],
+            ),
+            (
+                "Privacidad",
+                [
+                    (("privacy", "strict_mode"), "Modo estricto", bool),
+                    (("privacy", "debug_logs"), "Incluir contenido en logs (debug)", bool),
+                    (("privacy", "enable_diff"), "Generar diff (puede filtrar texto original)", bool),
+                    (("privacy", "artifact_ttl_days"), "TTL de artefactos (días)", int),
+                ],
+            ),
+            (
+                "PII",
+                [
+                    (("pii", "regex_profiles"), "Perfiles regex (uno por línea)", list),
                 ],
             ),
         ]
@@ -1010,7 +1079,7 @@ class AnonymizerApp(tk.Tk):
 
         about_text = (
             "Anonimizador de documentos legales\n\n"
-            "Este aplicativo procesa archivos PDF y Word de forma local, dividiéndolos en fragmentos "
+            "Este aplicativo procesa archivos PDF y Word (.docx) de forma local, dividiéndolos en fragmentos "
             "para enviarlos a un modelo de lenguaje alojado en LM Studio. Cada fragmento se anonimiza "
             "siguiendo reglas estrictas y luego se recompone para generar un documento final.\n\n"
             "Características destacadas:\n"
@@ -1035,7 +1104,9 @@ class AnonymizerApp(tk.Tk):
     def _get_nested_value(self, data: Dict[str, Any], path: Tuple[str, ...]) -> Any:
         node = data
         for key in path:
-            node = node[key]
+            if not isinstance(node, dict):
+                return ""
+            node = node.get(key, "")
         return node
 
     def _populate_config_form(self) -> None:
@@ -1102,7 +1173,7 @@ class AnonymizerApp(tk.Tk):
     def _select_file(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Selecciona un archivo",
-            filetypes=[("Documentos", "*.pdf *.doc *.docx")],
+            filetypes=[("Documentos", "*.pdf *.docx")],
         )
         if file_path:
             self.file_path_var.set(file_path)

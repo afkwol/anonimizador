@@ -1,6 +1,6 @@
 # Anonimizador de Documentos Legales
 
-Aplicación de escritorio en Python que anonimiza archivos judiciales PDF y Word de forma local. El flujo divide cada documento en fragmentos, envía cada chunk a un modelo de lenguaje servido por [LM Studio](https://lmstudio.ai), aplica reglas estrictas de anonimización y reconstruye el documento final. Incluye una interfaz gráfica con pestañas para configurar parámetros, seguir el progreso y revisar los registros.
+Aplicación de escritorio en Python que anonimiza archivos judiciales PDF y Word (.docx) de forma local. El flujo aplica un pre-masking determinista de PII, divide cada documento en fragmentos solapados medidos por tokens, envía cada chunk a un modelo de lenguaje servido por [LM Studio](https://lmstudio.ai) bajo instrucciones estrictas, valida la salida y recompone el documento final. Incluye una interfaz gráfica con pestañas para configurar parámetros, seguir el progreso y revisar los registros.
 
 ## Requisitos
 
@@ -21,8 +21,10 @@ python3 -m pip install -r requirements.txt
 La configuración se almacena en `config.yaml` y admite override mediante variables de entorno. Campos principales:
 
 - `lm_api`: `base_url`, `api_key`, `model` que LM Studio expondrá.
-- `chunking`: parámetros de troceo en tokens (`max_context_tokens`, `overlap_tokens`, `safety_factor`). `overlap_tokens` debe permanecer en `0` porque la recomposición se basa en fragmentos contiguos.
+- `chunking`: `max_prompt_tokens`, `overlap_tokens`, `safety_factor` y `tokenizer` para trocear con solapamiento respetando el límite de contexto.
 - `inference`: hiperparámetros enviados al endpoint `/chat/completions`. El cliente fuerza la ejecución determinista (`temperature 0`, `top_p 1`, `top_k 1`) para preservar el contenido.
+- `privacy`: `strict_mode`, `debug_logs`, `enable_diff`, `artifact_ttl_days` para controlar validación, artefactos y visibilidad de contenido sensible.
+- `pii`: `regex_profiles` (perfiles de patrones) para la detección previa/posterior.
 - `runtime`: comportamiento del pipeline (directorio de logs, reintentos, modo debug, etc.).
 
 Variables de entorno opcionales (ejemplos):
@@ -32,6 +34,8 @@ set LM_API_BASE=http://127.0.0.1:1234/v1
 set LM_API_KEY=lm-studio
 set LM_API_MODEL=granite-3.1-8b-instruct
 set LOGS_DIR=C:\anonimizador\logs
+set STRICT_MODE=1
+set ENABLE_DIFF=0
 ```
 
 La pestaña **Configuración** de la GUI permite editar y guardar estos valores sin abrir el archivo manualmente.
@@ -53,7 +57,7 @@ La pestaña **Configuración** de la GUI permite editar y guardar estos valores 
 
 ### Pestaña Procesamiento
 
-- **Examinar…**: selecciona un archivo `.pdf`, `.doc` o `.docx`.
+- **Examinar…**: selecciona un archivo `.pdf` o `.docx`.
 - **Iniciar anonimización**: procesa el documento en un hilo independiente. Se muestra el progreso por chunks, bitácora y resumen final.
 - **Limpiar resumen**: limpia el panel de resultado sin afectar los logs.
 
@@ -75,13 +79,14 @@ La pestaña **Configuración** de la GUI permite editar y guardar estos valores 
 ## Salidas
 
 - Documento anonimizado: se guarda junto al archivo original con sufijo `_anonimizado.txt`.
-- Reporte de comparación HTML: se genera junto al archivo original como `_comparacion.html`, con diferencias resaltadas entre el texto original y el anonimizado.
-- Validación automática: el `run_summary` registra métricas de longitud y, si detecta diferencias no permitidas, detalla los fragmentos observados para revisión rápida.
+- Reporte de comparación HTML: opcional; si `privacy.enable_diff=true` se genera `_comparacion.html`. Puede exponer texto original, úsalo solo si es imprescindible.
+- Validación automática: el `run_summary` registra métricas de longitud y, si detecta diferencias no permitidas, detalla los fragmentos (ocultando contenido salvo que `privacy.debug_logs=true`).
+- Si algún chunk falla, el estado global pasa a `error` y el texto correspondiente se reemplaza por `[CHUNK OMITIDO POR ERROR]` para evitar filtrar contenido sin anonimizar.
 - Logs estructurados:
-  - `logs/run_<timestamp>.jsonl`: entradas por chunk con métricas de duración, previews y errores.
+  - `logs/run_<timestamp>.jsonl`: entradas por chunk con métricas de duración y errores. Por defecto sin contenido textual; activa `privacy.debug_logs` para incluir previews bajo tu responsabilidad.
   - `logs/run_summary_<timestamp>.json`: resumen del proceso (estado, tiempos, rutas).
 
-En modo debug (`runtime.debug: true`) también se registran las entradas y salidas completas de cada chunk.
+En modo debug (`runtime.debug: true`) y/o `privacy.debug_logs: true` se habilitan vistas detalladas de entrada/salida de chunks para depuración controlada.
 
 ## Resolución de problemas
 
